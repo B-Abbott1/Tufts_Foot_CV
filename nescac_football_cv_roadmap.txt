@@ -1,0 +1,184 @@
+================================================================================
+        NESCAC FOOTBALL COMPUTER VISION PROJECT — ROADMAP & REQUIREMENTS
+================================================================================
+
+--------------------------------------------------------------------------------
+PHASE 0: SETUP & DATA ACQUISITION
+--------------------------------------------------------------------------------
+
+Film Access
+  - Contact athletic department / coaching staff for Hudl access
+  - Export game film for your own team (easiest starting point)
+  - Prioritize end zone angle film over sideline (less occlusion, better top-down view)
+  - Collect both offensive and defensive snaps
+  - Aim for at least 2-3 full games worth of film to start
+
+Labeling Tools (pick one)
+  - Roboflow       — easiest to use, has a free tier, built-in augmentation
+  - CVAT           — open source, more control
+  - Label Studio   — flexible, good for custom schemas
+
+Hardware / Compute
+  - Local GPU (NVIDIA preferred) OR
+  - Google Colab Pro / Kaggle Notebooks (free GPU access)
+  - Cloud: AWS EC2 g4dn or Lambda Labs for heavier training runs
+
+--------------------------------------------------------------------------------
+PHASE 1: CORE COMPUTER VISION PIPELINE
+--------------------------------------------------------------------------------
+
+Step 1 — Frame Extraction
+  - Extract individual frames from video using OpenCV
+  - Target: 10fps is sufficient (no need for full 30fps for most tasks)
+  - Store frames organized by game → play → frame
+
+Step 2 — Player Detection
+  - Model: YOLOv8 (recommended starting point, easiest to fine-tune)
+  - Input: Raw video frames
+  - Output: Bounding boxes around every visible player per frame
+  - Fine-tune on a small labeled dataset of your own film (~300-500 labeled frames)
+  - Baseline dataset: Search Roboflow Universe for existing football detection datasets
+
+Step 3 — Team Separation
+  - Use jersey color segmentation (HSV color masking in OpenCV) to label each
+    detected player as Team A, Team B, or Official
+  - This is a simple but critical step — everything downstream depends on it
+
+Step 4 — Player Tracking
+  - Model: ByteTrack or DeepSORT (both integrate easily with YOLOv8)
+  - Input: Per-frame bounding boxes from Step 2
+  - Output: Consistent player_id assigned across frames within a play
+  - This gives you trajectories — the sequence of positions for each player
+
+Step 5 — Homography Transform (Pixel → Field Coordinates)
+  - Map pixel (x, y) coordinates to real field coordinates (yards)
+  - Use yard lines and hash marks as reference points for the transform
+  - Output: Every player position expressed as (yards from LOS, yards from sideline)
+  - This is one of the harder steps — budget extra time here
+  - Tools: OpenCV findHomography(), manual calibration per camera angle
+
+Step 6 — Snap Frame Detection
+  - Automatically identify the frame where the ball is snapped
+  - Approach: Detect sudden coordinated movement of offensive line
+  - Alternative: Manual tagging per play (acceptable for early prototype)
+  - Critical because all downstream analytics are relative to the snap
+
+--------------------------------------------------------------------------------
+PHASE 2: DATA LAYER — TRACKING DATA SCHEMA
+--------------------------------------------------------------------------------
+
+Core Per-Frame Record
+  - frame_id         : unique frame identifier
+  - play_id          : which play this frame belongs to
+  - player_id        : consistent ID within a play (from tracker)
+  - team             : offense / defense / official
+  - x                : field coordinate (yards from LOS)
+  - y                : field coordinate (yards from sideline)
+  - timestamp        : time in seconds relative to snap frame
+
+Core Per-Play Record
+  - play_id          : unique identifier
+  - game_id          : which game
+  - snap_frame       : frame number of the snap
+  - down             : 1st / 2nd / 3rd / 4th
+  - distance         : yards to go
+  - hash             : left / middle / right
+  - play_type        : run / pass
+  - result           : yards gained
+  - complete         : yes / no (pass plays)
+
+Storage
+  - CSV or Parquet files per game (easy to load into Pandas)
+  - SQLite database if you want relational querying across multiple games
+
+--------------------------------------------------------------------------------
+PHASE 3: ANALYTICS MODULES
+--------------------------------------------------------------------------------
+
+Module A — Formation Classifier (start here, highest ROI)
+  - Input: Pre-snap (x, y) positions for all 11 offensive players
+  - Approach: K-means or DBSCAN clustering on player coordinates
+  - Then: Train a classifier (Random Forest or simple NN) on formation labels
+  - Output: Formation label per play (e.g., shotgun trips, I-formation, empty)
+  - Why first: Only needs pre-snap data, no trajectory required
+
+Module B — Route Tree Classification
+  - Input: Receiver (x, y) trajectory from snap to ~3 seconds post-snap
+  - Approach: Cluster trajectories using DTW (Dynamic Time Warping) or
+    Fréchet distance, then label clusters as known route types
+  - Output: Route label per receiver per play
+  - Useful for: Tendency scouting, coverage matching
+
+Module C — Heat Maps
+  - Input: Single (x, y) point per play (run point of attack or pass target location)
+  - Output: 2D density map overlaid on a football field graphic
+  - Weight by yards gained to show high-success zones vs. high-volume zones
+  - Tools: Matplotlib, Seaborn KDE plots, or Plotly for interactive maps
+
+Module D — Coverage Shell Detection
+  - Input: DB + WR paired trajectories post-snap
+  - Signal: Does the DB move with the WR (man) or hold/rotate (zone)?
+  - Approach: Compare relative distance over first ~1 second post-snap
+  - Output: Man / Zone label per defensive back per play
+
+Module E — Tendency Scouting
+  - Input: Formation label + down/distance + play result
+  - Approach: Group plays by formation and situation, compute run/pass rates,
+    success rates, preferred directions
+  - Output: Opponent tendency report — most useful product for coaches
+
+--------------------------------------------------------------------------------
+PHASE 4: TOOLING & TECH STACK
+--------------------------------------------------------------------------------
+
+Computer Vision
+  - ultralytics        : YOLOv8 training and inference (pip install ultralytics)
+  - opencv-python      : frame extraction, homography, color segmentation
+  - supervision        : Roboflow's tracking wrapper, simplifies ByteTrack integration
+
+Data Science
+  - pandas / numpy     : trajectory data wrangling
+  - scipy / tslearn    : DTW and trajectory distance metrics
+  - scikit-learn       : clustering (K-means, DBSCAN) and classification
+
+Visualization
+  - matplotlib         : heat maps, player paths
+  - plotly             : interactive field visualizations
+  - seaborn            : KDE overlays
+
+Labeling & Dataset Management
+  - roboflow           : dataset versioning, augmentation, export to YOLO format
+
+Deep Learning Framework
+  - PyTorch            : underlying framework for all models above
+
+--------------------------------------------------------------------------------
+PHASE 5: SUGGESTED BUILD ORDER
+--------------------------------------------------------------------------------
+
+  Week 1-2   : Get film, set up labeling tool, label ~400 frames with bounding boxes
+  Week 3-4   : Fine-tune YOLOv8, get reliable player detection running
+  Week 5     : Add team color segmentation, verify team labels
+  Week 6     : Integrate ByteTrack, produce first player trajectories
+  Week 7     : Build homography transform for one camera angle
+  Week 8     : Tag snap frames, finalize per-frame and per-play data schema
+  Week 9-10  : Build Formation Classifier (Module A) — first deliverable to coaches
+  Week 11-12 : Build Heat Maps (Module C) — second deliverable to coaches
+  Week 13+   : Route classification, coverage detection, tendency reports
+
+--------------------------------------------------------------------------------
+NOTES & KNOWN HARD PROBLEMS
+--------------------------------------------------------------------------------
+
+  - Pose estimation is NOT recommended for low-quality Hudl film — skip for now
+  - Ball detection is very hard — treat it as optional / future work
+  - Player re-identification across plays requires extra work — use manual play
+    segmentation early on instead
+  - Homography calibration per camera angle is time-intensive but only needs
+    to be done once per unique camera setup
+  - Budget significant time for data labeling — it is the most time-consuming
+    part of any sports CV project
+
+================================================================================
+END OF ROADMAP
+================================================================================

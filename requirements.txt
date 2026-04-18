@@ -1,0 +1,11 @@
+# Python 3.10+ recommended.
+# PyTorch: install the wheel that matches your platform from https://pytorch.org/
+#   (CUDA build for NVIDIA GPU, or CPU-only). pip install torch may auto-select CPU.
+opencv-python>=4.8.0
+ultralytics>=8.3.0
+torch>=2.1.0
+torchvision>=0.16.0
+supervision>=0.22.0
+pandas>=2.0.0
+pyarrow>=14.0.0
+numpy>=1.24.0
