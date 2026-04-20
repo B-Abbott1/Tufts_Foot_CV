@@ -1,0 +1,20 @@
+PowerShell script for testing while tuning YOLO:
+.\run_yolo_tuning.ps1
+
+Example with custom weights/tag:
+.\run_yolo_tuning.ps1 -Weights "runs\detect\train\weights\best.pt" -Tag "exp1"
+EDITING:
+.\run_yolo_tuning.ps1 -PlayId "test_frame1" -FramePath "data/frames/test/test_frame1/frame_1.png" -FrameId 1     
+Homography debug image only (runs detect; writes side-by-side white mask by default):
+.\run_homography_debug.ps1
+EDITING:
+.\run_homography_debug.ps1 -PlayId "test_frame1" -FramePath "data/frames/test/test_frame1/frame_1.png" -FrameId 1
+
+View detection box confidences for one frame (raw detections Parquet, not tracking):
+python -c "import pandas as pd; df=pd.read_parquet('data/detections/test_test_frame_new.parquet'); f=2; print(df.loc[df.frame_id==f, ['x1','y1','x2','y2','confidence']].sort_values('confidence', ascending=False).to_string(index=False))"
+Change the Parquet path and f=<frame_id> to match your run.
+
+Overlay raw detections with confidence + foot (x,y) labels (after detect):
+.\run_overlay_detections_debug.ps1
+
+Optional: -Point center | -Point both | -NoConfidence | -Out "my.jpg"

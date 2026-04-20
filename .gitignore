@@ -1,9 +1,10 @@
-# Raw film footage — too large for GitHub
+# Raw film footage 
 data/raw/
-
 # Model weight files
 models/weights/
 
+*.png
+*.jpg
 *.mp4
 *.pt
 *.parquet
