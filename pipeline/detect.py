@@ -176,7 +176,8 @@ def _estimate_field_quad_from_image(
         if y0 < int(0.08 * h) or y0 > int(0.72 * h):
             continue
         top_pts.append((float(x), float(y0)))
-    if len(top_pts) < max(30, w // 60):
+    min_top_pts = max(10, w // 240)
+    if len(top_pts) < min_top_pts:
         return None
 
     pts = np.array(top_pts, dtype=np.float32)
@@ -186,7 +187,7 @@ def _estimate_field_quad_from_image(
     # Robust line fit y = a*x + b with iterative MAD-based outlier rejection.
     inlier = np.ones(len(pts), dtype=bool)
     for _ in range(3):
-        if inlier.sum() < max(20, len(pts) // 3):
+        if inlier.sum() < max(8, len(pts) // 4):
             break
         x_fit = x_all[inlier]
         y_fit = y_all[inlier]
@@ -199,7 +200,7 @@ def _estimate_field_quad_from_image(
         thr = max(8.0, 2.8 * scale)
         inlier = resid <= thr
 
-    if inlier.sum() < max(20, len(pts) // 3):
+    if inlier.sum() < max(8, len(pts) // 4):
         return None
 
     x_fit = x_all[inlier]
@@ -222,20 +223,20 @@ def _estimate_field_quad_from_image(
     if x_right - x_left < 0.45 * w:
         return None
 
-    # In this view, top edge should reach near the far-right sideline.
-    if x_right < 0.90 * w:
-        x_right = float(w - 1)
+    # Keep all corners on full image x-bounds to avoid cropping field width.
+    x_left = 0.0
+    x_right = float(w - 1)
 
     y_left = float(a * x_left + b)
     y_right = float(a * x_right + b)
     y_white_anchor_left: Optional[float] = None
     y_white_anchor_right: Optional[float] = None
 
-    # Softly pull top-line intercept toward strong horizontal white paint
-    # near the inferred top boundary (common far-sideline visual cue).
+    # White sideline first: derive top boundary from strong horizontal white paint.
+    # In sideline footage this cue should always exist on at least one side.
     y_med = float(np.median(a * x_fit + b))
-    lo = int(np.clip(y_med - 0.22 * h, 0, h - 1))
-    hi = int(np.clip(y_med + 0.03 * h, 0, h - 1))
+    lo = int(np.clip(0.02 * h, 0, h - 1))
+    hi = int(np.clip(0.40 * h, 0, h - 1))
     if hi > lo:
         w_left = white_horiz[lo : hi + 1, : int(0.52 * w)]
         w_right = white_horiz[lo : hi + 1, int(0.48 * w) :]
@@ -243,7 +244,7 @@ def _estimate_field_quad_from_image(
         row_white_r = (w_right > 0).mean(axis=1) if w_right.size else np.array([])
         def _anchor_from_row_profile(row_white: np.ndarray) -> Optional[tuple[float, float]]:
             """
-            Return (top_row_idx, thickness_rows) for strongest white horizontal band.
+            Return (center_row_idx, thickness_rows) for strongest white horizontal band.
             Uses adaptive thresholding + contiguous run selection for robustness.
             """
             if row_white.size == 0:
@@ -255,9 +256,9 @@ def _estimate_field_quad_from_image(
                 .to_numpy(dtype=np.float32)
             )
             pmax = float(np.max(prof))
-            if pmax < 0.006:
+            if pmax < 0.003:
                 return None
-            thr = max(0.006, 0.35 * pmax)
+            thr = max(0.003, 0.25 * pmax)
             hits = np.where(prof >= thr)[0]
             if hits.size == 0:
                 return None
@@ -268,7 +269,7 @@ def _estimate_field_quad_from_image(
             prev = int(hits[0])
             for idx in hits[1:]:
                 idx_i = int(idx)
-                if idx_i == prev + 1:
+                if idx_i <= prev + 2:
                     prev = idx_i
                     continue
                 runs.append((s, prev))
@@ -278,19 +279,33 @@ def _estimate_field_quad_from_image(
             if not runs:
                 return None
 
-            best_run = runs[0]
-            best_score = -1.0
+            # Keep thresholding/runs, then choose the topmost credible run:
+            # - minimum run width
+            # - minimum mean profile strength
+            min_width = max(1, int(0.002 * h))
+            pmax = float(np.max(prof))
+            min_mean = max(0.004, 0.15 * pmax)
+            width_valid_runs: list[tuple[int, int]] = []
+            valid_runs: list[tuple[int, int]] = []
             for a_run, b_run in runs:
                 width = b_run - a_run + 1
-                if width < 2:
+                if width < min_width:
                     continue
-                score = float(np.mean(prof[a_run : b_run + 1])) * (1.0 + 0.03 * width)
-                if score > best_score:
-                    best_score = score
-                    best_run = (a_run, b_run)
-            a_best, b_best = best_run
+                width_valid_runs.append((a_run, b_run))
+                mean_run = float(np.mean(prof[a_run : b_run + 1]))
+                if mean_run < min_mean:
+                    continue
+                valid_runs.append((a_run, b_run))
+            if not valid_runs:
+                if not width_valid_runs:
+                    return None
+                valid_runs = width_valid_runs
+
+            # Pick smallest row index => topmost credible sideline candidate.
+            a_best, b_best = min(valid_runs, key=lambda ab: ab[0])
             thickness = float(max(1, b_best - a_best + 1))
-            return float(a_best), thickness
+            center = 0.5 * float(a_best + b_best)
+            return center, thickness
 
         anchor_l = _anchor_from_row_profile(row_white_l)
         anchor_r = _anchor_from_row_profile(row_white_r)
@@ -299,19 +314,37 @@ def _estimate_field_quad_from_image(
         if anchor_r is not None:
             y_white_anchor_right = float(lo + anchor_r[0])
 
-        # Keep global shift for continuity when both sides are available.
-        anchors = [v for v in [y_white_anchor_left, y_white_anchor_right] if v is not None]
-        if anchors:
-            y_white = float(np.mean(anchors))
-            shift = 0.70 * (y_white - y_med)
-            max_shift = 0.14 * h
-            shift = float(np.clip(shift, -max_shift, max_shift))
-            y_left += shift
-            y_right += shift
+        # Fallback pass: if horizontal-opened mask misses, search raw white mask.
+        if y_white_anchor_left is None or y_white_anchor_right is None:
+            w_left_raw = white_mask[lo : hi + 1, : int(0.52 * w)]
+            w_right_raw = white_mask[lo : hi + 1, int(0.48 * w) :]
+            row_white_l_raw = (w_left_raw > 0).mean(axis=1) if w_left_raw.size else np.array([])
+            row_white_r_raw = (w_right_raw > 0).mean(axis=1) if w_right_raw.size else np.array([])
+            if y_white_anchor_left is None:
+                anchor_l_raw = _anchor_from_row_profile(row_white_l_raw)
+                if anchor_l_raw is not None:
+                    y_white_anchor_left = float(lo + anchor_l_raw[0])
+            if y_white_anchor_right is None:
+                anchor_r_raw = _anchor_from_row_profile(row_white_r_raw)
+                if anchor_r_raw is not None:
+                    y_white_anchor_right = float(lo + anchor_r_raw[0])
+
+        # Force top-line to follow white sideline anchor(s) every time.
+        if y_white_anchor_left is not None and y_white_anchor_right is not None:
+            y_left = float(y_white_anchor_left)
+            y_right = float(y_white_anchor_right)
+        elif y_white_anchor_left is not None:
+            y_left = float(y_white_anchor_left)
+            y_right = float(y_white_anchor_left)
+        elif y_white_anchor_right is not None:
+            y_left = float(y_white_anchor_right)
+            y_right = float(y_white_anchor_right)
+        else:
+            return None
 
     # Clamp top line into plausible vertical region.
     y_lo = 0.06 * h
-    y_hi = 0.52 * h
+    y_hi = 0.40 * h
     y_left = float(np.clip(y_left, y_lo, y_hi))
     y_right = float(np.clip(y_right, y_lo, y_hi))
 
@@ -340,9 +373,9 @@ def _estimate_field_quad_from_image(
         x_bl = x_left
     if not np.isfinite(x_br):
         x_br = x_right
-    if x_br < x_bl + 0.45 * w:
-        x_bl = min(x_bl, x_left)
-        x_br = max(x_br, x_right)
+    # Keep bottom corners on full image x-bounds as well.
+    x_bl = 0.0
+    x_br = float(w - 1)
 
     # Bottom edge BL–BR: use same slope as top sideline TL–TR so the quad is a
     # consistent trapezoid (not a skewed chevron from a flat bottom_y vs sloped top).
