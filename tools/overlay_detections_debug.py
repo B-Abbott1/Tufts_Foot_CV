@@ -14,6 +14,21 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 
+TEAM_COLORS = {
+    "team_a": (255, 255, 255),
+    "team_b": (255, 128, 0),
+    "offense": (255, 255, 255),
+    "defense": (255, 128, 0),
+    "official": (0, 0, 255),
+    "unknown": (0, 255, 255),
+}
+
+
+def _team_color(row: pd.Series) -> tuple[int, int, int]:
+    team = str(row.get("team", "unknown"))
+    return TEAM_COLORS.get(team, TEAM_COLORS["unknown"])
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Overlay raw detections on a frame with x,y labels (foot point and/or box center).",
@@ -61,6 +76,8 @@ def main() -> int:
     for _, row in sub.iterrows():
         x1, y1, x2, y2 = int(row["x1"]), int(row["y1"]), int(row["x2"]), int(row["y2"])
         conf = float(row.get("confidence", 0.0))
+        team = str(row.get("team", "unknown"))
+        team_conf = float(row.get("team_confidence", 0.0))
         cx = 0.5 * (float(x1) + float(x2))
         cy_c = 0.5 * (float(y1) + float(y2))
         cy_f = float(y2)
@@ -74,9 +91,12 @@ def main() -> int:
 
         if args.show_confidence:
             parts = [f"{conf:.2f}"] + parts
+        if team != "unknown":
+            parts.append(f"{team} {team_conf:.2f}")
 
         label = " | ".join(parts)
-        cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 255), th)
+        color = _team_color(row)
+        cv2.rectangle(img, (x1, y1), (x2, y2), color, th)
 
         tx, ty = x1, max(12, y1 - 4)
         for line_i, line in enumerate(label.split(" | ")):
@@ -88,7 +108,7 @@ def main() -> int:
                 (tx, y_line),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 fs,
-                (0, 255, 255),
+                color,
                 th,
                 lineType=cv2.LINE_AA,
             )

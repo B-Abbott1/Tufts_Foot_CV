@@ -29,6 +29,12 @@ function Invoke-YoloRun {
         --out $detectionsOut
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+    Write-Host "Assigning team labels..."
+    & python -m pipeline.team_separation `
+        --detections $detectionsOut `
+        --out $detectionsOut
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
     Write-Host "Running track..."
     & python -m pipeline.track `
         --detections $detectionsOut `

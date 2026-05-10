@@ -307,6 +307,70 @@ def _estimate_field_quad_from_image(
             center = 0.5 * float(a_best + b_best)
             return center, thickness
 
+        def _fit_top_white_line(
+            white_src: np.ndarray,
+            provisional_y_left: float,
+            provisional_y_right: float,
+        ) -> Optional[tuple[float, float]]:
+            """
+            Fit the top boundary to actual white-line pixels near the row anchors.
+            The row anchors identify the band; this recovers the line slope across the full frame.
+            """
+            anchor_rows = [
+                float(y)
+                for y in (y_white_anchor_left, y_white_anchor_right)
+                if y is not None
+            ]
+            if not anchor_rows:
+                return None
+
+            pad = max(20, h // 16)
+            y0 = int(np.clip(min(anchor_rows) - pad, lo, hi))
+            y1 = int(np.clip(max(anchor_rows) + pad, lo, hi))
+            if y1 <= y0:
+                return None
+
+            band_mask = white_src[y0 : y1 + 1]
+            ys_rel, xs = np.where(band_mask > 0)
+            if xs.size < max(80, w // 10):
+                return None
+            ys = ys_rel.astype(np.float32) + float(y0)
+            xs_f = xs.astype(np.float32)
+
+            dx = float(w - 1) or 1.0
+            provisional = provisional_y_left + (provisional_y_right - provisional_y_left) * (xs_f / dx)
+            corridor = max(18.0, 0.06 * float(h))
+            near = np.abs(ys - provisional) <= corridor
+            if int(np.count_nonzero(near)) < max(80, w // 10):
+                return None
+
+            x_near = xs_f[near]
+            y_near = ys[near]
+            # Collapse line thickness to one median y per x so large white patches do not dominate.
+            xy = pd.DataFrame({"x": x_near, "y": y_near}).groupby("x", sort=True)["y"].median()
+            if len(xy) < max(50, w // 20):
+                return None
+            x_line = xy.index.to_numpy(dtype=np.float32)
+            y_line = xy.to_numpy(dtype=np.float32)
+            if float(x_line.max() - x_line.min()) < 0.35 * float(w):
+                return None
+
+            inlier = np.ones(len(x_line), dtype=bool)
+            for _ in range(3):
+                if int(np.count_nonzero(inlier)) < max(30, len(x_line) // 4):
+                    return None
+                a_fit, b_fit = np.polyfit(x_line[inlier], y_line[inlier], deg=1)
+                resid = np.abs(y_line - (a_fit * x_line + b_fit))
+                med = float(np.median(resid[inlier]))
+                mad = float(np.median(np.abs(resid[inlier] - med)))
+                scale = max(1.0, 1.4826 * mad)
+                inlier = resid <= max(4.0, 2.8 * scale)
+
+            if int(np.count_nonzero(inlier)) < max(30, len(x_line) // 4):
+                return None
+            a_fit, b_fit = np.polyfit(x_line[inlier], y_line[inlier], deg=1)
+            return float(b_fit), float(a_fit * float(w - 1) + b_fit)
+
         anchor_l = _anchor_from_row_profile(row_white_l)
         anchor_r = _anchor_from_row_profile(row_white_r)
         if anchor_l is not None:
@@ -342,11 +406,19 @@ def _estimate_field_quad_from_image(
         else:
             return None
 
+        fitted_top = _fit_top_white_line(white_horiz, y_left, y_right)
+        if fitted_top is None:
+            fitted_top = _fit_top_white_line(white_mask, y_left, y_right)
+        if fitted_top is not None:
+            y_left, y_right = fitted_top
+
     # Clamp top line into plausible vertical region.
     y_lo = 0.06 * h
     y_hi = 0.40 * h
     y_left = float(np.clip(y_left, y_lo, y_hi))
     y_right = float(np.clip(y_right, y_lo, y_hi))
+    y_top_base_left = y_left
+    y_top_base_right = y_right
 
     # Side-specific correction and safety:
     # set corners at the top of detected white-line boundary when available.
@@ -357,12 +429,12 @@ def _estimate_field_quad_from_image(
         row_idx = int(np.clip(y_white_anchor_left, 0, h - 1))
         local = white_horiz[max(0, row_idx - max(6, h // 120)) : min(h, row_idx + max(6, h // 120) + 1), : int(0.52 * w)]
         thickness = float(max(1.0, np.mean((local > 0).sum(axis=0)) if local.size else 1.0))
-        y_left = float(y_white_anchor_left + anchor_offset_px + anchor_offset_frac * thickness)
+        y_left = float(y_top_base_left + anchor_offset_px + anchor_offset_frac * thickness)
     if y_white_anchor_right is not None:
         row_idx = int(np.clip(y_white_anchor_right, 0, h - 1))
         local = white_horiz[max(0, row_idx - max(6, h // 120)) : min(h, row_idx + max(6, h // 120) + 1), int(0.48 * w) :]
         thickness = float(max(1.0, np.mean((local > 0).sum(axis=0)) if local.size else 1.0))
-        y_right = float(y_white_anchor_right + anchor_offset_px + anchor_offset_frac * thickness)
+        y_right = float(y_top_base_right + anchor_offset_px + anchor_offset_frac * thickness)
 
     # Bottom anchors from smoothed field extents near frame bottom.
     bottom_y = int(np.nanmax(np.where(valid_rows)[0]))
@@ -678,7 +750,7 @@ def run_detection_on_frames(
     field_margin_x: float = 0.01,
     field_margin_y: float = 0.02,
     top_inclusion_px: float = 0.0,
-    bottom_exclusion_px: float = 25.0,
+    bottom_exclusion_px: float = 100.0,
     min_box_h_frac: float = 0.0,
     homography_debug_image: Optional[str | Path] = None,
     homography_debug_show_white_mask: bool = False,
@@ -989,8 +1061,8 @@ def main() -> None:
     parser.add_argument(
         "--bottom-exclusion-px",
         type=float,
-        default=75.0,
-        help="Foot y must be <= quad bottom BL–BR at that x minus this offset (px; line parallel above field bottom).",
+        default=125.0,
+        help="Foot y must be <= quad bottom BL-BR at that x minus this offset (px; line parallel above field bottom).",
     )
     parser.add_argument(
         "--min-box-h-frac",

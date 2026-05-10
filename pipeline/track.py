@@ -11,6 +11,77 @@ import pandas as pd
 import supervision as sv
 
 
+def _box_iou_matrix(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    if len(a) == 0 or len(b) == 0:
+        return np.zeros((len(a), len(b)), dtype=np.float32)
+    x1 = np.maximum(a[:, None, 0], b[None, :, 0])
+    y1 = np.maximum(a[:, None, 1], b[None, :, 1])
+    x2 = np.minimum(a[:, None, 2], b[None, :, 2])
+    y2 = np.minimum(a[:, None, 3], b[None, :, 3])
+    inter = np.maximum(0.0, x2 - x1) * np.maximum(0.0, y2 - y1)
+    area_a = np.maximum(0.0, a[:, 2] - a[:, 0]) * np.maximum(0.0, a[:, 3] - a[:, 1])
+    area_b = np.maximum(0.0, b[:, 2] - b[:, 0]) * np.maximum(0.0, b[:, 3] - b[:, 1])
+    union = area_a[:, None] + area_b[None, :] - inter
+    return np.divide(inter, union, out=np.zeros_like(inter, dtype=np.float32), where=union > 0)
+
+
+def _labels_for_tracked_boxes(tracked_xyxy: np.ndarray, source_rows: pd.DataFrame | None) -> tuple[list[str], list[float]]:
+    if source_rows is None or source_rows.empty or "team" not in source_rows.columns:
+        return ["unknown"] * len(tracked_xyxy), [0.0] * len(tracked_xyxy)
+
+    source_xyxy = source_rows[["x1", "y1", "x2", "y2"]].to_numpy(dtype=np.float32)
+    iou = _box_iou_matrix(tracked_xyxy.astype(np.float32), source_xyxy)
+    best = iou.argmax(axis=1) if iou.size else np.zeros(len(tracked_xyxy), dtype=np.int64)
+    best_iou = iou.max(axis=1) if iou.size else np.zeros(len(tracked_xyxy), dtype=np.float32)
+
+    teams: list[str] = []
+    confs: list[float] = []
+    team_values = source_rows["team"].fillna("unknown").astype(str).to_numpy()
+    if "team_confidence" in source_rows.columns:
+        conf_values = source_rows["team_confidence"].fillna(0.0).to_numpy(dtype=np.float32)
+    else:
+        conf_values = np.zeros(len(source_rows), dtype=np.float32)
+
+    for i in range(len(tracked_xyxy)):
+        if best_iou[i] < 0.30:
+            teams.append("unknown")
+            confs.append(0.0)
+            continue
+        src_i = int(best[i])
+        teams.append(str(team_values[src_i]))
+        confs.append(float(conf_values[src_i]))
+    return teams, confs
+
+
+def _smooth_track_team_labels(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty or "team" not in df.columns:
+        return df
+    out = df.copy()
+    if "team_confidence" not in out.columns:
+        out["team_confidence"] = 0.0
+
+    for (_, _), idx in out.groupby(["play_id", "player_id"], sort=False).groups.items():
+        sub = out.loc[idx]
+        scores: dict[str, float] = {}
+        for _, row in sub.iterrows():
+            team = str(row.get("team", "unknown"))
+            if team == "unknown":
+                continue
+            weight = max(0.05, float(row.get("team_confidence", 0.0)))
+            scores[team] = scores.get(team, 0.0) + weight
+        if not scores:
+            continue
+        team, score = max(scores.items(), key=lambda kv: kv[1])
+        total = sum(scores.values())
+        smoothed_conf = float(np.clip(score / total if total > 0 else 0.0, 0.0, 0.99))
+        out.loc[idx, "team"] = team
+        out.loc[idx, "team_confidence"] = np.maximum(
+            out.loc[idx, "team_confidence"].to_numpy(dtype=np.float32),
+            smoothed_conf,
+        )
+    return out
+
+
 def _frame_detections_from_rows(
     sub: pd.DataFrame,
 ) -> tuple[sv.Detections, tuple[int, int]]:
@@ -58,6 +129,7 @@ def track_play(
         if tids is None:
             continue
 
+        teams, team_confs = _labels_for_tracked_boxes(xyxy, sub)
         for i in range(len(xyxy)):
             tid = tids[i]
             if tid is None or (isinstance(tid, float) and np.isnan(tid)):
@@ -69,7 +141,8 @@ def track_play(
                     "play_id": play_id,
                     "game_id": game_id,
                     "player_id": int(tid),
-                    "team": "unknown",
+                    "team": teams[i],
+                    "team_confidence": float(team_confs[i]),
                     "x": np.nan,
                     "y": np.nan,
                     "x1": float(x1),
@@ -101,6 +174,7 @@ def track_from_detections_df(df: pd.DataFrame) -> pd.DataFrame:
                 "game_id",
                 "player_id",
                 "team",
+                "team_confidence",
                 "x",
                 "y",
                 "x1",
@@ -111,7 +185,7 @@ def track_from_detections_df(df: pd.DataFrame) -> pd.DataFrame:
                 "timestamp",
             ]
         )
-    return pd.DataFrame(all_rows)
+    return _smooth_track_team_labels(pd.DataFrame(all_rows))
 
 
 def track_from_parquet(
