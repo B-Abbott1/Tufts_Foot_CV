@@ -3,6 +3,24 @@ data/raw/
 # Model weight files
 models/weights/
 
+# --- Training data & artifacts (do not upload) ---
+# Extracted frames and YOLO label txts (negate .gitkeep so empty dirs can stay tracked)
+data/frames/**
+!data/frames/.gitkeep
+data/labels/**
+!data/labels/.gitkeep
+# Synced Ultralytics dataset + team/ref crop trees
+datasets/
+# Ultralytics / PyTorch training run outputs
+models/runs/
+runs/
+# Dataset / hub caches
+*.cache
+.cache/
+# Experiment tracking (optional)
+wandb/
+mlruns/
+
 *.png
 *.jpg
 *.mp4

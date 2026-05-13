@@ -1,0 +1,6 @@
+game_id,split
+g01,train
+g02,train
+g03,train
+g04,val
+g05,test

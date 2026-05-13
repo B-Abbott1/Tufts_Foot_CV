@@ -1,0 +1,9 @@
+# YOLO dataset config (paths relative to this file).
+# Regenerate with: python tools/sync_frames_to_yolo_dataset.py
+path: ../../datasets/detection
+train: images/train
+val: images/val
+test: images/test
+names:
+  0: player
+  1: official
